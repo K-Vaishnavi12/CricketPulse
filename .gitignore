@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.streamlit/secrets.toml
+data/warehouse/*.wal
+airflow/logs/
+airflow/plugins/__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# NOTE: models/*.pkl and data/warehouse/*.duckdb ARE committed on purpose,
+# so the Streamlit Cloud demo works instantly without a training step.
+!models/*.pkl
+!data/warehouse/*.duckdb
