@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.genai.llm import get_llm, is_configured
+from src.genai.llm import call_with_fallback, get_llm, is_configured
 
 
 SYSTEM = """
@@ -18,17 +18,19 @@ def generate_highlights(summary: dict) -> str:
     """summary keys: team_a, team_b, winner, inn1_team, inn1_score, inn1_wickets,
     inn2_team, inn2_score, inn2_wickets, top_batter, top_batter_runs,
     top_bowler, top_bowler_wickets, result_text."""
+    fallback = _fallback(summary)
     if not is_configured():
-        return _fallback(summary)
-    try:
+        return fallback
+
+    def _call() -> str:
         llm = get_llm(temperature=0.55)
         reply = llm.invoke([
             SystemMessage(content=SYSTEM),
             HumanMessage(content=str(summary)),
         ]).content
         return reply.strip().replace("\n", " ")
-    except Exception:
-        return _fallback(summary)
+
+    return call_with_fallback(_call, fallback=fallback)
 
 
 def _fallback(s: dict) -> str:

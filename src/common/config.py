@@ -30,7 +30,7 @@ _hydrate_from_streamlit_secrets()
 class Settings(BaseSettings):
     # GenAI
     gemini_api_key: str = "not-set"
-    gemini_model: str = "gemini-flash-latest"
+    gemini_model: str = "gemini-2.0-flash-lite"
 
     # Kafka
     kafka_bootstrap_servers: str = "localhost:9092"

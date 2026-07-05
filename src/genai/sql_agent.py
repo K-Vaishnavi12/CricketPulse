@@ -16,7 +16,7 @@ import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.common.logging import get_logger
-from src.genai.llm import get_llm
+from src.genai.llm import call_with_fallback, get_llm, quota_available, quota_seconds_remaining
 from src.warehouse.db import get_conn
 
 log = get_logger("genai.sql")
@@ -142,13 +142,41 @@ class SQLAnswer:
 
 def ask(question: str) -> SQLAnswer:
     """Full round-trip: NL question -> SQL -> results -> NL answer."""
-    llm = get_llm(temperature=0.0)
+    # Guard: if we already know the quota is exhausted, bail early with a friendly message
+    if not quota_available():
+        cooldown = quota_seconds_remaining()
+        wait_msg = (f"in about {cooldown} seconds" if cooldown < 120
+                    else f"in ~{cooldown // 60} minutes")
+        return SQLAnswer(
+            question=question,
+            sql="",
+            results=pd.DataFrame(),
+            natural_answer=(
+                f"The AI is temporarily rate-limited (Google Gemini free tier). "
+                f"Try again {wait_msg}. Your question was: '{question}'."
+            ),
+            error="quota_exhausted",
+        )
 
-    # 1. NL -> SQL
-    sql_reply = llm.invoke([
-        SystemMessage(content=SCHEMA_HINT),
-        HumanMessage(content=f"Question: {question}\n\nReturn only the DuckDB SQL query."),
-    ]).content
+    # 1. NL -> SQL (quota-guarded)
+    def _gen_sql() -> str:
+        llm = get_llm(temperature=0.0)
+        return llm.invoke([
+            SystemMessage(content=SCHEMA_HINT),
+            HumanMessage(content=f"Question: {question}\n\nReturn only the DuckDB SQL query."),
+        ]).content
+
+    sql_reply = call_with_fallback(_gen_sql, fallback="")
+    if not sql_reply:
+        return SQLAnswer(
+            question=question,
+            sql="",
+            results=pd.DataFrame(),
+            natural_answer=("The AI service hit a rate limit. "
+                            "Please wait about a minute and try again."),
+            error="quota_or_transient",
+        )
+
     sql = _extract_sql(sql_reply)
     log.info(f"Generated SQL: {sql}")
 
@@ -176,14 +204,23 @@ def ask(question: str) -> SQLAnswer:
             error=str(e),
         )
 
-    # 3. Results -> NL
+    # 3. Results -> NL (quota-guarded)
     csv_snippet = results.head(20).to_csv(index=False) if not results.empty else "(no rows)"
-    nl_llm = get_llm(temperature=0.4)
-    nl_reply = nl_llm.invoke([
-        HumanMessage(content=ANSWER_PROMPT.format(
-            question=question, sql=sql, results_csv=csv_snippet,
-        )),
-    ]).content
+
+    def _explain() -> str:
+        nl_llm = get_llm(temperature=0.4)
+        return nl_llm.invoke([
+            HumanMessage(content=ANSWER_PROMPT.format(
+                question=question, sql=sql, results_csv=csv_snippet,
+            )),
+        ]).content
+
+    # Fallback: if we can't call the LLM again, just show the raw data snippet
+    fallback_answer = (
+        f"Query returned {len(results)} row(s). Here's a preview:\n\n"
+        + (results.head(5).to_string(index=False) if not results.empty else "(no rows)")
+    )
+    nl_reply = call_with_fallback(_explain, fallback=fallback_answer)
 
     return SQLAnswer(
         question=question,

@@ -29,6 +29,7 @@ def _md(html: str) -> None:
     'this looks like a code block' heuristic."""
     st.markdown(textwrap.dedent(html).strip(), unsafe_allow_html=True)
 
+from src.common.config import settings
 from src.dashboard.live_sim import (
     is_live_active, live_status, start_new_match, step_live_match, stop_live_match,
 )
@@ -36,6 +37,7 @@ from src.dashboard.theme import team_palette, team_short
 from src.genai.commentator import explain_match_state
 from src.genai.highlights import generate_highlights
 from src.genai.llm import is_configured as genai_ready
+from src.genai.llm import quota_status
 from src.genai.sql_agent import ask
 from src.warehouse.db import get_conn
 
@@ -695,6 +697,43 @@ with st.sidebar:
     commentary_placeholder = st.empty()
 
     st.divider()
+
+    # === AI status indicator ===
+    _qs = quota_status()
+    if _qs["configured"]:
+        if _qs["available"]:
+            _md(f"""
+            <div style='padding:10px 12px; background:linear-gradient(135deg, rgba(19,168,124,0.12), rgba(19,168,124,0.04));
+                        border:1px solid rgba(19,168,124,0.3); border-radius:10px; font-size:12px;'>
+                <div style='display:flex; justify-content:space-between; align-items:center;'>
+                    <span style='color:#6ee7b7; font-weight:700; font-size:11px; letter-spacing:1px;'>AI ● READY</span>
+                    <span style='color:#94a3b8; font-size:11px;'>{_qs['calls_this_session']} calls</span>
+                </div>
+                <div style='color:#94a3b8; font-size:11px; margin-top:4px;'>
+                    Gemini {settings.gemini_model.replace('gemini-', '')}
+                </div>
+            </div>
+            """)
+        else:
+            _md(f"""
+            <div style='padding:10px 12px; background:linear-gradient(135deg, rgba(251,191,36,0.12), rgba(251,191,36,0.04));
+                        border:1px solid rgba(251,191,36,0.3); border-radius:10px; font-size:12px;'>
+                <div style='color:#fbbf24; font-weight:700; font-size:11px; letter-spacing:1px;'>AI ● COOLING DOWN</div>
+                <div style='color:#94a3b8; font-size:11px; margin-top:4px;'>
+                    Retry in ~{_qs['cooldown_s']}s (Gemini rate limit)
+                </div>
+            </div>
+            """)
+    else:
+        _md("""
+        <div style='padding:10px 12px; background:rgba(148,163,184,0.08);
+                    border:1px solid rgba(148,163,184,0.15); border-radius:10px; font-size:12px; color:#94a3b8;'>
+            <span style='font-weight:700; font-size:11px; letter-spacing:1px;'>AI ● OFF</span>
+            <div style='font-size:11px; margin-top:4px;'>Add GEMINI_API_KEY to unlock chat</div>
+        </div>
+        """)
+
+    st.divider()
     st.caption(
         "Kafka streaming · Airflow ETL · DuckDB warehouse · "
         "scikit-learn ML · LangChain + Gemini text-to-SQL"
@@ -1080,8 +1119,8 @@ with col_man:
 # ---------------- AI highlights + Expert take ---------------- #
 st.markdown("<div class='section-title'>AI Analyst</div>", unsafe_allow_html=True)
 
-# Highlights (cached ~2 min so we don't spam Gemini)
-@st.cache_data(ttl=120)
+# Highlights (cached ~15 min so we don't spam Gemini)
+@st.cache_data(ttl=900, show_spinner=False)
 def _cached_highlights(match_id: str, result_text: str | None) -> str:
     with get_conn(read_only=True) as conn:
         batters = conn.execute("""
@@ -1149,7 +1188,24 @@ if not score_df.empty:
             if _has_target else None
         ),
     }
-    take = explain_match_state(state, latest_wp_batting)
+    # Cache expert take by match_id + score bucket - regenerates only when the
+    # match state actually changes meaningfully (not every 3-second refresh).
+    # Bucket the score to nearest 10 runs so we don't hit Gemini for every ball.
+    _score_bucket = int(latest_inn_row["score"]) // 10
+    _wicket_bucket = int(latest_inn_row["wickets"])
+    _phase_bucket = int(latest_inn_row["overs"] // 5)  # every 5 overs
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _cached_expert_take(match_id: str, innings: int, score_bucket: int,
+                            wicket_bucket: int, phase_bucket: int,
+                            state_snapshot: dict, wp: float | None) -> str:
+        return explain_match_state(state_snapshot, wp)
+
+    take = _cached_expert_take(
+        match["match_id"], int(latest_inn_row["innings"]),
+        _score_bucket, _wicket_bucket, _phase_bucket,
+        state, latest_wp_batting,
+    )
     _md(f"""
     <div class='insight-card'>
         <span class='badge'>EXPERT TAKE</span>
@@ -1288,6 +1344,12 @@ else:
         prompt = st.session_state.pending_prompt
         st.session_state.pending_prompt = None
 
+    # Cache identical questions per-match for 30 minutes so users can retry / share
+    # without re-hitting the Gemini quota.
+    @st.cache_data(ttl=1800, show_spinner=False)
+    def _cached_ask(match_id: str, q: str):
+        return ask(q)
+
     for entry in st.session_state.chat_history:
         with st.chat_message(entry["role"]):
             st.markdown(entry["content"])
@@ -1304,7 +1366,7 @@ else:
         with st.chat_message("assistant"):
             with st.spinner("Analyzing the data..."):
                 try:
-                    answer = ask(prompt)
+                    answer = _cached_ask(match["match_id"], prompt)
                     st.markdown(answer.natural_answer)
                     with st.expander("View SQL & data"):
                         st.code(answer.sql, language="sql")

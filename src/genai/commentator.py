@@ -11,7 +11,7 @@ from typing import Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.common.logging import get_logger
-from src.genai.llm import get_llm, is_configured
+from src.genai.llm import call_with_fallback, get_llm, is_configured
 
 log = get_logger("genai.commentator")
 
@@ -37,11 +37,11 @@ Keep it to 60 words max. No markdown.
 
 
 def describe_ball(ball: dict, prediction: Optional[dict] = None) -> str:
-    """Commentate on one ball. Falls back to a rule-based line if LLM not configured."""
+    """Commentate on one ball. Falls back to a rule-based line if LLM not configured or quota hit."""
+    fallback = _fallback_ball_line(ball)
     if not is_configured():
-        return _fallback_ball_line(ball)
+        return fallback
 
-    llm = get_llm(temperature=0.7)
     context = {
         "over": f"{ball['over']}.{ball['ball']}",
         "innings": ball["innings"],
@@ -61,36 +61,35 @@ def describe_ball(ball: dict, prediction: Optional[dict] = None) -> str:
             else (prediction.get("win_prob_team_b") if prediction else None)
         ),
     }
-    try:
+
+    def _call() -> str:
+        llm = get_llm(temperature=0.7)
         reply = llm.invoke([
             SystemMessage(content=BALL_SYSTEM),
             HumanMessage(content=str(context)),
         ]).content
         return reply.strip().replace("\n", " ")
-    except Exception as e:
-        log.warning(f"Commentator LLM failed: {e}")
-        return _fallback_ball_line(ball)
+
+    return call_with_fallback(_call, fallback=fallback)
 
 
 def explain_match_state(state: dict, win_prob_batting: Optional[float] = None) -> str:
     """One-paragraph 'expert take'."""
+    fallback = _fallback_state_line(state, win_prob_batting)
     if not is_configured():
-        return _fallback_state_line(state, win_prob_batting)
+        return fallback
 
-    llm = get_llm(temperature=0.5)
-    payload = {
-        **state,
-        "win_prob_batting_team": win_prob_batting,
-    }
-    try:
+    payload = {**state, "win_prob_batting_team": win_prob_batting}
+
+    def _call() -> str:
+        llm = get_llm(temperature=0.5)
         reply = llm.invoke([
             SystemMessage(content=STATE_SYSTEM),
             HumanMessage(content=str(payload)),
         ]).content
         return reply.strip()
-    except Exception as e:
-        log.warning(f"State-explanation LLM failed: {e}")
-        return _fallback_state_line(state, win_prob_batting)
+
+    return call_with_fallback(_call, fallback=fallback)
 
 
 # --------------------------------------------------------------------------- #
