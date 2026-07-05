@@ -1,32 +1,31 @@
-# Slim dependencies for Streamlit Cloud deployment.
-# The dashboard runs the simulator + ML inference + Gemini chat all in-process.
-# For local development with Kafka+Airflow, use requirements.txt instead.
+# Slim dependencies for Streamlit Cloud deployment (Python 3.13/3.14 compatible)
+# Uses versions that ship pre-built wheels for the latest Python, so no source compiling.
 
 # Core
-python-dotenv==1.0.1
-pydantic==2.9.2
-pydantic-settings==2.6.1
-loguru==0.7.2
+python-dotenv>=1.0.1
+pydantic>=2.10,<3
+pydantic-settings>=2.7,<3
+loguru>=0.7.2
 
 # Warehouse + data
-duckdb==1.1.3
-pandas==2.2.3
-numpy==1.26.4
-pyarrow==18.1.0
+duckdb>=1.2.0
+pandas>=2.2.3
+numpy>=2.1,<3
+pyarrow>=19.0.0
 
 # ML
-scikit-learn==1.5.2
-joblib==1.4.2
+scikit-learn>=1.6.0
+joblib>=1.4.2
 
 # GenAI
-langchain==0.3.9
-langchain-core==0.3.21
-langchain-google-genai==2.0.6
-langchain-community==0.3.8
-langchain-text-splitters==0.3.2
-google-generativeai==0.8.3
+langchain>=0.3.15,<0.4
+langchain-core>=0.3.30,<0.4
+langchain-google-genai>=2.0.9
+langchain-community>=0.3.15
+langchain-text-splitters>=0.3.4
+google-generativeai>=0.8.3
 
 # Dashboard
-streamlit==1.40.2
-plotly==5.24.1
-streamlit-autorefresh==1.0.1
+streamlit>=1.42.0
+plotly>=5.24.1
+streamlit-autorefresh>=1.0.1
