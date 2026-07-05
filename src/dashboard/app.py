@@ -66,6 +66,27 @@ def _fetch_current_match() -> dict | None:
 
 
 @st.cache_data(ttl=3)
+def _fetch_match_by_id(match_id: str) -> dict | None:
+    with get_conn(read_only=True) as conn:
+        row = conn.execute("""
+            SELECT b.match_id, m.team_a, m.team_b, m.venue,
+                   m.toss_winner, m.toss_decision, m.winner, m.result_text,
+                   MAX(b.event_ts) AS last_ts
+              FROM bronze.matches_raw m
+              LEFT JOIN bronze.balls_raw b USING (match_id)
+             WHERE m.match_id = ?
+             GROUP BY b.match_id, m.team_a, m.team_b, m.venue,
+                      m.toss_winner, m.toss_decision, m.winner, m.result_text
+             LIMIT 1
+        """, [match_id]).fetchone()
+    if row is None:
+        return None
+    keys = ["match_id", "team_a", "team_b", "venue", "toss_winner",
+            "toss_decision", "winner", "result_text", "last_ts"]
+    return dict(zip(keys, row))
+
+
+@st.cache_data(ttl=3)
 def _fetch_live_score(match_id: str) -> pd.DataFrame:
     with get_conn(read_only=True) as conn:
         return conn.execute("""
@@ -192,6 +213,61 @@ def _fetch_momentum(match_id: str, overs_back: int = 3) -> dict:
         return {}
     return {row["batting_team"]: {"runs": int(row["runs"]), "wickets": int(row["wickets"])}
             for _, row in rows.iterrows()}
+
+
+@st.cache_data(ttl=10)
+def _fetch_all_matches() -> pd.DataFrame:
+    """List every match ever recorded (for match history / picker)."""
+    with get_conn(read_only=True) as conn:
+        return conn.execute("""
+            SELECT m.match_id, m.team_a, m.team_b, m.venue,
+                   m.winner, m.result_text, m.start_ts,
+                   COALESCE(MAX(b.innings_score), 0) AS max_score,
+                   COUNT(b.match_id) AS ball_count,
+                   MAX(b.event_ts) AS last_ball_ts
+              FROM bronze.matches_raw m
+              LEFT JOIN bronze.balls_raw b ON b.match_id = m.match_id
+             GROUP BY m.match_id, m.team_a, m.team_b, m.venue,
+                      m.winner, m.result_text, m.start_ts
+             ORDER BY COALESCE(MAX(b.event_ts), m.start_ts) DESC
+             LIMIT 30
+        """).df()
+
+
+@st.cache_data(ttl=5)
+def _fetch_match_kpis(match_id: str) -> dict:
+    """Global counters for the sidebar KPI cards."""
+    with get_conn(read_only=True) as conn:
+        row = conn.execute("""
+            SELECT
+                COUNT(*)                                              AS balls,
+                SUM(CASE WHEN runs_batter = 4 THEN 1 ELSE 0 END)     AS fours,
+                SUM(CASE WHEN runs_batter = 6 THEN 1 ELSE 0 END)     AS sixes,
+                SUM(CASE WHEN is_wicket THEN 1 ELSE 0 END)           AS wickets,
+                SUM(runs_batter + runs_extras)                        AS runs,
+                SUM(CASE WHEN (runs_batter + runs_extras) = 0 THEN 1 ELSE 0 END) AS dots
+              FROM bronze.balls_raw WHERE match_id = ?
+        """, [match_id]).fetchone()
+    if row is None:
+        return {"balls": 0, "fours": 0, "sixes": 0, "wickets": 0, "runs": 0, "dots": 0}
+    return dict(zip(["balls", "fours", "sixes", "wickets", "runs", "dots"],
+                    [int(v or 0) for v in row]))
+
+
+@st.cache_data(ttl=5)
+def _fetch_highlight_moments(match_id: str, limit: int = 8) -> pd.DataFrame:
+    """Get most impactful ball events for the commentary/talks feed."""
+    with get_conn(read_only=True) as conn:
+        return conn.execute("""
+            SELECT innings, over, ball, batter, bowler, batting_team,
+                   runs_batter, runs_extras, extras_kind, is_wicket, dismissal_kind,
+                   player_out, innings_score, innings_wickets, event_ts
+              FROM bronze.balls_raw
+             WHERE match_id=?
+               AND (is_wicket = TRUE OR runs_batter = 6 OR runs_batter = 4)
+             ORDER BY event_ts DESC
+             LIMIT ?
+        """, [match_id, limit]).df()
 
 
 # ============================================================================ #
@@ -526,37 +602,91 @@ def _inject_css(pal_a: dict, pal_b: dict) -> None:
 
 
 # ============================================================================ #
-# Sidebar
+# Sidebar — OTT navigation + controls
 # ============================================================================ #
 
 with st.sidebar:
-    st.markdown("### CricketPulse")
-    st.caption("Real-time cricket intelligence")
-    st.divider()
+    # Brand
+    st.markdown("""
+    <div style='padding: 4px 0 14px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 14px;'>
+        <div style='font-size:22px; font-weight:800; letter-spacing:-0.5px; color:#fff;'>
+            <span style='background:linear-gradient(135deg,#13a87c,#3b82f6);
+                         -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+                         background-clip:text;'>CricketPulse</span>
+        </div>
+        <div style='color:#64748b; font-size:11px; margin-top:2px; letter-spacing:1px; text-transform:uppercase;'>
+            AI Match Intelligence
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("**Live Match Controls**")
+    # === Live Match Controls (compact) ===
+    st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:8px;'>Live Streaming</div>", unsafe_allow_html=True)
     if is_live_active():
         stat = live_status()
-        st.success(f"Streaming: {stat['balls_delivered']} balls delivered")
-        if st.button("Stop match", use_container_width=True):
+        st.success(f"● Streaming · {stat['balls_delivered']} balls")
+        if st.button("Stop stream", use_container_width=True):
             stop_live_match()
             st.rerun()
     else:
-        team_a_in = st.text_input("Team A", value="Mumbai Mavericks")
-        team_b_in = st.text_input("Team B", value="Chennai Chargers")
-        venue_in  = st.text_input("Venue",  value="Wankhede Stadium")
-        if st.button("Start live match", type="primary", use_container_width=True):
-            start_new_match(team_a_in, team_b_in, venue_in)
-            st.rerun()
+        with st.expander("Start a new match", expanded=False):
+            team_a_in = st.text_input("Team A", value="Mumbai Mavericks")
+            team_b_in = st.text_input("Team B", value="Chennai Chargers")
+            venue_in = st.text_input("Venue", value="Wankhede Stadium")
+            if st.button("Start live match", type="primary", use_container_width=True):
+                start_new_match(team_a_in, team_b_in, venue_in)
+                st.session_state.selected_match_id = None
+                st.rerun()
 
     st.divider()
+
+    # === Match Picker (History) ===
+    st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:8px;'>Match History</div>", unsafe_allow_html=True)
+    _all_matches = _fetch_all_matches()
+    if _all_matches.empty:
+        st.caption("No matches yet.")
+    else:
+        options = {"Live / Latest": None}
+        for _, m in _all_matches.iterrows():
+            label = f"{team_short(m['team_a'])} vs {team_short(m['team_b'])}"
+            if m['result_text']:
+                label += f" · {'W' if m['winner']==m['team_a'] else 'L'}"
+            options[f"{label}  ({int(m['ball_count'])} balls)"] = m['match_id']
+        selection = st.selectbox(
+            "Select match", options.keys(),
+            index=0,
+            label_visibility="collapsed",
+        )
+        st.session_state.selected_match_id = options[selection]
+
+    st.divider()
+
+    # === Sidebar action selector (OTT-style) ===
+    st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:8px;'>Panels</div>", unsafe_allow_html=True)
+    show_commentary_panel = st.toggle("Rich Commentary", value=True, help="AI-narrated key moments")
+    show_stats_panel = st.toggle("Match Stats", value=True, help="Quick KPI counters")
+    show_talks_panel = st.toggle("Talks & Chat", value=True, help="Ask the AI analyst")
+
+    st.divider()
+
+    # === Auto-refresh ===
     auto_refresh = st.toggle("Live auto-refresh (2s)", value=True)
     if auto_refresh:
         st_autorefresh(interval=2000, key="live_refresh")
+
+    st.divider()
+
+    # === Sidebar quick stats (shown after we know the match) ===
+    # placeholder — filled after we compute the match below
+    stats_placeholder = st.empty()
+
+    # === Sidebar commentary preview (also filled below) ===
+    commentary_placeholder = st.empty()
+
     st.divider()
     st.caption(
-        "End-to-end pipeline: Kafka streaming (local) + Airflow ETL + DuckDB warehouse "
-        "+ scikit-learn ML + LangChain & Gemini text-to-SQL + real-time inference."
+        "Kafka streaming · Airflow ETL · DuckDB warehouse · "
+        "scikit-learn ML · LangChain + Gemini text-to-SQL"
     )
 
 
@@ -569,7 +699,9 @@ if is_live_active():
 # MAIN
 # ============================================================================ #
 
-match = _fetch_current_match()
+# Honor the sidebar match selector; otherwise fall back to the latest match.
+_selected_id = st.session_state.get("selected_match_id")
+match = _fetch_match_by_id(_selected_id) if _selected_id else _fetch_current_match()
 
 if match is None:
     _inject_css({"primary": "#13a87c", "accent": "#22c9a0", "text_on": "#fff"},
@@ -586,6 +718,76 @@ if match is None:
 pal_a = team_palette(match["team_a"])
 pal_b = team_palette(match["team_b"])
 _inject_css(pal_a, pal_b)
+
+
+# ============================================================================ #
+# Populate sidebar placeholders now that we know the match
+# ============================================================================ #
+
+if show_stats_panel:
+    _kpis = _fetch_match_kpis(match["match_id"])
+    with stats_placeholder.container():
+        st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:10px;'>Match Stats</div>", unsafe_allow_html=True)
+        st.markdown(f"""
+        <div style='display:grid; grid-template-columns: 1fr 1fr; gap:8px;'>
+            <div style='background:linear-gradient(135deg, rgba(59,130,246,0.10), rgba(59,130,246,0.03)); border:1px solid rgba(59,130,246,0.2); border-radius:10px; padding:10px 12px;'>
+                <div style='color:#93c5fd; font-size:22px; font-weight:800;'>{_kpis['fours']}</div>
+                <div style='color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:1px;'>Fours</div>
+            </div>
+            <div style='background:linear-gradient(135deg, rgba(168,85,247,0.10), rgba(168,85,247,0.03)); border:1px solid rgba(168,85,247,0.2); border-radius:10px; padding:10px 12px;'>
+                <div style='color:#c4b5fd; font-size:22px; font-weight:800;'>{_kpis['sixes']}</div>
+                <div style='color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:1px;'>Sixes</div>
+            </div>
+            <div style='background:linear-gradient(135deg, rgba(239,68,68,0.10), rgba(239,68,68,0.03)); border:1px solid rgba(239,68,68,0.2); border-radius:10px; padding:10px 12px;'>
+                <div style='color:#fca5a5; font-size:22px; font-weight:800;'>{_kpis['wickets']}</div>
+                <div style='color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:1px;'>Wickets</div>
+            </div>
+            <div style='background:linear-gradient(135deg, rgba(148,163,184,0.10), rgba(148,163,184,0.03)); border:1px solid rgba(148,163,184,0.2); border-radius:10px; padding:10px 12px;'>
+                <div style='color:#cbd5e1; font-size:22px; font-weight:800;'>{_kpis['dots']}</div>
+                <div style='color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:1px;'>Dots</div>
+            </div>
+        </div>
+        <div style='margin-top:10px; padding:10px 12px; background:linear-gradient(135deg, rgba(19,168,124,0.10), rgba(19,168,124,0.03)); border:1px solid rgba(19,168,124,0.2); border-radius:10px;'>
+            <div style='display:flex; justify-content:space-between; align-items:baseline;'>
+                <div>
+                    <div style='color:#6ee7b7; font-size:22px; font-weight:800;'>{_kpis['runs']}</div>
+                    <div style='color:#94a3b8; font-size:10px; text-transform:uppercase; letter-spacing:1px;'>Total Runs</div>
+                </div>
+                <div style='color:#94a3b8; font-size:12px;'>{_kpis['balls']} balls</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+if show_commentary_panel:
+    _hi_moments = _fetch_highlight_moments(match["match_id"], limit=6)
+    with commentary_placeholder.container():
+        st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin:16px 0 10px 0;'>Key Moments</div>", unsafe_allow_html=True)
+        if _hi_moments.empty:
+            st.caption("Moments will appear when a boundary or wicket occurs.")
+        else:
+            for _, r in _hi_moments.iterrows():
+                d = r.to_dict()
+                over = f"O{int(d['over'])}.{int(d['ball'])}"
+                team_code = team_short(d["batting_team"])
+                if d["is_wicket"]:
+                    icon = "<span style='background:#ef4444;color:#fff;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:800;letter-spacing:0.5px;'>OUT</span>"
+                    txt = f"<b>{d.get('player_out') or d['batter']}</b> out"
+                elif d["runs_batter"] == 6:
+                    icon = "<span style='background:#a855f7;color:#fff;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:800;letter-spacing:0.5px;'>SIX</span>"
+                    txt = f"<b>{d['batter']}</b> smashes it"
+                else:
+                    icon = "<span style='background:#3b82f6;color:#fff;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:800;letter-spacing:0.5px;'>FOUR</span>"
+                    txt = f"<b>{d['batter']}</b> nicely placed"
+                st.markdown(f"""
+                <div style='padding:8px 10px; background:rgba(255,255,255,0.03); border-radius:8px; margin-bottom:5px; font-size:12px; color:#cbd5e1;'>
+                    <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;'>
+                        {icon}
+                        <span style='color:#64748b; font-family:monospace; font-size:11px;'>{over} · {team_code}</span>
+                    </div>
+                    <div>{txt}</div>
+                    <div style='color:#64748b; font-size:11px; margin-top:2px;'>Score {int(d['innings_score'])}/{int(d['innings_wickets'])}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
 
 # ---------------- Live ticker ---------------- #
@@ -728,8 +930,13 @@ with col_gauge:
                 "threshold": {"line": {"color": pal_a["accent"], "width": 4},
                               "thickness": 0.8, "value": prob_a_pct},
             },
-            title={"text": f"<span style='color:#94a3b8;font-size:12px;letter-spacing:1.5px'>WIN PROBABILITY</span><br><span style='color:{pal_a[chr(39)+chr(112)+chr(114)+chr(105)+chr(109)+chr(97)+chr(114)+chr(121)+chr(39)]};font-size:14px;font-weight:700'>{team_short(match['team_a'])}</span>",
-                   "font": {"size": 12, "color": "#94a3b8"}},
+            title={
+                "text": (
+                    f"<span style='color:#94a3b8;font-size:12px;letter-spacing:1.5px'>WIN PROBABILITY</span>"
+                    f"<br><span style='color:{pal_a['primary']};font-size:14px;font-weight:700'>{team_short(match['team_a'])}</span>"
+                ),
+                "font": {"size": 12, "color": "#94a3b8"},
+            },
         ))
         fig.update_layout(
             height=240,
@@ -1041,18 +1248,21 @@ else:
 
 
 # ---------------- AI chat ---------------- #
-st.markdown("<div class='section-title'>Ask the AI Analyst</div>", unsafe_allow_html=True)
-if not genai_ready():
+if not show_talks_panel:
+    pass  # user hid this panel from the sidebar
+elif not genai_ready():
+    st.markdown("<div class='section-title'>Ask the AI Analyst</div>", unsafe_allow_html=True)
     st.markdown("""
     <div class='insight-card' style='background: linear-gradient(135deg, rgba(251,191,36,0.10) 0%, rgba(239,68,68,0.08) 100%); border-color: rgba(251,191,36,0.3)'>
         <span class='badge' style='background:linear-gradient(135deg,#fbbf24,#f59e0b); color:#1a1a1a'>SETUP</span>
         Add your free <b>Google Gemini API key</b> to unlock natural-language questions.
         <br><br>
         <span style='color:#94a3b8'>Get a free key at</span> <a href='https://aistudio.google.com/apikey' target='_blank' style='color:#93c5fd'>aistudio.google.com/apikey</a>
-        <span style='color:#94a3b8'>and paste it into</span> <code>.streamlit/secrets.toml</code>
+        <span style='color:#94a3b8'>and paste it into the Streamlit Cloud secrets settings.</span>
     </div>
     """, unsafe_allow_html=True)
 else:
+    st.markdown("<div class='section-title'>Ask the AI Analyst</div>", unsafe_allow_html=True)
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
