@@ -18,6 +18,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
+# Streamlit's markdown parser treats any line with 4+ leading spaces as a code block.
+# When we build multi-line HTML with normal Python indentation, we must strip
+# that indentation BEFORE passing to st.markdown(..., unsafe_allow_html=True).
+import textwrap
+
+
+def _md(html: str) -> None:
+    """Render dedented HTML with unsafe_allow_html so we never trip Streamlit's
+    'this looks like a code block' heuristic."""
+    st.markdown(textwrap.dedent(html).strip(), unsafe_allow_html=True)
+
 from src.dashboard.live_sim import (
     is_live_active, live_status, start_new_match, step_live_match, stop_live_match,
 )
@@ -607,7 +618,7 @@ def _inject_css(pal_a: dict, pal_b: dict) -> None:
 
 with st.sidebar:
     # Brand
-    st.markdown("""
+    _md("""
     <div style='padding: 4px 0 14px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 14px;'>
         <div style='font-size:22px; font-weight:800; letter-spacing:-0.5px; color:#fff;'>
             <span style='background:linear-gradient(135deg,#13a87c,#3b82f6);
@@ -618,7 +629,7 @@ with st.sidebar:
             AI Match Intelligence
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
     # === Live Match Controls (compact) ===
     st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:8px;'>Live Streaming</div>", unsafe_allow_html=True)
@@ -706,12 +717,12 @@ match = _fetch_match_by_id(_selected_id) if _selected_id else _fetch_current_mat
 if match is None:
     _inject_css({"primary": "#13a87c", "accent": "#22c9a0", "text_on": "#fff"},
                 {"primary": "#3b82f6", "accent": "#60a5fa", "text_on": "#fff"})
-    st.markdown("""
+    _md("""
     <div class='hero'><div class='hero-inner'>
         <div class='hero-title'>CricketPulse</div>
         <div class='hero-sub'>Real-time cricket analytics + AI commentary. Start a match from the sidebar to see the dashboard come alive.</div>
     </div></div>
-    """, unsafe_allow_html=True)
+    """)
     st.info("Click **Start live match** in the sidebar to stream a fresh game.")
     st.stop()
 
@@ -728,7 +739,7 @@ if show_stats_panel:
     _kpis = _fetch_match_kpis(match["match_id"])
     with stats_placeholder.container():
         st.markdown("<div style='color:#94a3b8; font-size:11px; text-transform:uppercase; letter-spacing:1.2px; font-weight:700; margin-bottom:10px;'>Match Stats</div>", unsafe_allow_html=True)
-        st.markdown(f"""
+        _md(f"""
         <div style='display:grid; grid-template-columns: 1fr 1fr; gap:8px;'>
             <div style='background:linear-gradient(135deg, rgba(59,130,246,0.10), rgba(59,130,246,0.03)); border:1px solid rgba(59,130,246,0.2); border-radius:10px; padding:10px 12px;'>
                 <div style='color:#93c5fd; font-size:22px; font-weight:800;'>{_kpis['fours']}</div>
@@ -756,7 +767,7 @@ if show_stats_panel:
                 <div style='color:#94a3b8; font-size:12px;'>{_kpis['balls']} balls</div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
 if show_commentary_panel:
     _hi_moments = _fetch_highlight_moments(match["match_id"], limit=6)
@@ -778,7 +789,7 @@ if show_commentary_panel:
                 else:
                     icon = "<span style='background:#3b82f6;color:#fff;padding:2px 6px;border-radius:4px;font-size:9px;font-weight:800;letter-spacing:0.5px;'>FOUR</span>"
                     txt = f"<b>{d['batter']}</b> nicely placed"
-                st.markdown(f"""
+                _md(f"""
                 <div style='padding:8px 10px; background:rgba(255,255,255,0.03); border-radius:8px; margin-bottom:5px; font-size:12px; color:#cbd5e1;'>
                     <div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:3px;'>
                         {icon}
@@ -787,7 +798,7 @@ if show_commentary_panel:
                     <div>{txt}</div>
                     <div style='color:#64748b; font-size:11px; margin-top:2px;'>Score {int(d['innings_score'])}/{int(d['innings_wickets'])}</div>
                 </div>
-                """, unsafe_allow_html=True)
+                """)
 
 
 # ---------------- Live ticker ---------------- #
@@ -797,12 +808,12 @@ if not tick.empty:
     joiner = "<span class='sep'>|</span>"
     # duplicate content so the scroll animation loops seamlessly
     marquee = joiner.join(snippets + snippets)
-    st.markdown(f"""
+    _md(f"""
     <div class='ticker-wrap'>
         <div class='ticker-tag'>LIVE</div>
         <div class='ticker-scroll'>{marquee}</div>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ---------------- Hero ---------------- #
@@ -811,7 +822,7 @@ pill = ("<span class='finished-pill'>FINISHED</span>"
 result_line = match.get("result_text") or (
     f"Toss: {match['toss_winner']} chose to {match['toss_decision']}"
 )
-st.markdown(f"""
+_md(f"""
 <div class='hero'><div class='hero-inner'>
     <div>
         {pill}
@@ -821,7 +832,7 @@ st.markdown(f"""
     </div>
     <div class='hero-sub'>{match['venue']} &nbsp;·&nbsp; {result_line}</div>
 </div></div>
-""", unsafe_allow_html=True)
+""")
 
 
 # ---------------- Score cards ---------------- #
@@ -848,7 +859,7 @@ for _, row in score_df.iterrows():
 
     badge_style = f"background:{pal['primary']};color:{pal['text_on']}"
     with cols[idx]:
-        st.markdown(f"""
+        _md(f"""
         <div class='{card_class}'>
             <span class='team-badge' style='{badge_style}'>{team_short(batting_team)}</span>
             <div class='team-name'>Innings {int(row['innings'])} · {batting_team}</div>
@@ -856,7 +867,7 @@ for _, row in score_df.iterrows():
             <div class='score-sub'>{row['overs']} overs</div>
             {chase_html}
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
 
 # ---------------- Current over ---------------- #
@@ -1102,12 +1113,12 @@ def _cached_highlights(match_id: str, result_text: str | None) -> str:
 
 try:
     highlights = _cached_highlights(match["match_id"], match.get("result_text"))
-    st.markdown(f"""
+    _md(f"""
     <div class='highlights-card'>
         <span class='badge'>MATCH HIGHLIGHTS</span>
         {highlights}
     </div>
-    """, unsafe_allow_html=True)
+    """)
 except Exception:
     pass
 
@@ -1139,12 +1150,12 @@ if not score_df.empty:
         ),
     }
     take = explain_match_state(state, latest_wp_batting)
-    st.markdown(f"""
+    _md(f"""
     <div class='insight-card'>
         <span class='badge'>EXPERT TAKE</span>
         {take}
     </div>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # ---------------- Player cards (top 6 batters) ---------------- #
@@ -1166,32 +1177,25 @@ if not b.empty:
         role_txt = "OUT" if r["is_out"] else "NOT OUT"
         sr = float(r["strike_rate"])
         sr_pct = min(int(sr / 250 * 100), 100)  # cap the visual bar at SR 250
-        cards_html.append(f"""
-        <div class='player-card {tint}'>
-            <div class='player-name'>{r['batter']}</div>
-            <div class='player-role'>{team_short(team) if team else '?'} · {role_txt}</div>
-            <div class='player-stats'>
-                <div class='stat-block'>
-                    <div class='stat-value'>{int(r['runs'])}</div>
-                    <div class='stat-label'>Runs</div>
-                </div>
-                <div class='stat-block'>
-                    <div class='stat-value'>{int(r['balls_faced'])}</div>
-                    <div class='stat-label'>Balls</div>
-                </div>
-                <div class='stat-block'>
-                    <div class='stat-value'>{int(r['fours'])}·{int(r['sixes'])}</div>
-                    <div class='stat-label'>4s · 6s</div>
-                </div>
-                <div class='stat-block'>
-                    <div class='stat-value'>{sr:.0f}</div>
-                    <div class='stat-label'>SR</div>
-                </div>
-            </div>
-            <div class='sr-bar'><div class='sr-bar-fill' style='width:{sr_pct}%'></div></div>
-        </div>
-        """)
-    st.markdown(f"<div class='player-grid'>{''.join(cards_html)}</div>", unsafe_allow_html=True)
+        team_code = team_short(team) if team else "?"
+        card = (
+            f"<div class='player-card {tint}'>"
+            f"<div class='player-name'>{r['batter']}</div>"
+            f"<div class='player-role'>{team_code} · {role_txt}</div>"
+            f"<div class='player-stats'>"
+            f"<div class='stat-block'><div class='stat-value'>{int(r['runs'])}</div><div class='stat-label'>Runs</div></div>"
+            f"<div class='stat-block'><div class='stat-value'>{int(r['balls_faced'])}</div><div class='stat-label'>Balls</div></div>"
+            f"<div class='stat-block'><div class='stat-value'>{int(r['fours'])}·{int(r['sixes'])}</div><div class='stat-label'>4s · 6s</div></div>"
+            f"<div class='stat-block'><div class='stat-value'>{sr:.0f}</div><div class='stat-label'>SR</div></div>"
+            f"</div>"
+            f"<div class='sr-bar'><div class='sr-bar-fill' style='width:{sr_pct}%'></div></div>"
+            f"</div>"
+        )
+        cards_html.append(card)
+    st.markdown(
+        f"<div class='player-grid'>{''.join(cards_html)}</div>",
+        unsafe_allow_html=True,
+    )
 else:
     st.info("Player stats will appear after over 1 completes.")
 
@@ -1237,14 +1241,14 @@ else:
             msg = f"<b>{d.get('extras_kind') or 'extras'}</b> conceded by {d['bowler']}"
         else:
             msg = f"Dot ball · {d['batter']} vs {d['bowler']}"
-        st.markdown(f"""
+        _md(f"""
         <div class='ball-line {css_class}'>
             <span class='over-tag'>{over}</span>
             <span class='ball-chip {cls}' style='width:32px;height:32px;font-size:13px'>{label}</span>
             <span class='msg'>{msg}</span>
             <span class='final-score'>{int(d['innings_score'])}/{int(d['innings_wickets'])}</span>
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
 
 # ---------------- AI chat ---------------- #
@@ -1252,7 +1256,7 @@ if not show_talks_panel:
     pass  # user hid this panel from the sidebar
 elif not genai_ready():
     st.markdown("<div class='section-title'>Ask the AI Analyst</div>", unsafe_allow_html=True)
-    st.markdown("""
+    _md("""
     <div class='insight-card' style='background: linear-gradient(135deg, rgba(251,191,36,0.10) 0%, rgba(239,68,68,0.08) 100%); border-color: rgba(251,191,36,0.3)'>
         <span class='badge' style='background:linear-gradient(135deg,#fbbf24,#f59e0b); color:#1a1a1a'>SETUP</span>
         Add your free <b>Google Gemini API key</b> to unlock natural-language questions.
@@ -1260,7 +1264,7 @@ elif not genai_ready():
         <span style='color:#94a3b8'>Get a free key at</span> <a href='https://aistudio.google.com/apikey' target='_blank' style='color:#93c5fd'>aistudio.google.com/apikey</a>
         <span style='color:#94a3b8'>and paste it into the Streamlit Cloud secrets settings.</span>
     </div>
-    """, unsafe_allow_html=True)
+    """)
 else:
     st.markdown("<div class='section-title'>Ask the AI Analyst</div>", unsafe_allow_html=True)
     if "chat_history" not in st.session_state:
