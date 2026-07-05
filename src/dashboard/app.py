@@ -476,7 +476,7 @@ for _, row in score_df.iterrows():
     idx = int(row["innings"]) - 1
     is_current = idx == int(score_df["innings"].max() - 1) and not match.get("result_text")
     chase_html = ""
-    if row["innings"] == 2 and row["target"] is not None:
+    if row["innings"] == 2 and not pd.isna(row["target"]):
         balls_left = max(0, int(120 - row["overs"] * 6))
         runs_needed = max(0, int(row["target"]) - int(row["score"]))
         rrr = (runs_needed * 6 / balls_left) if balls_left > 0 else 0
@@ -577,19 +577,22 @@ if not score_df.empty:
             last["win_prob_team_a"] if latest_inn_row["batting_team"] == match["team_a"]
             else last["win_prob_team_b"]
         )
+    # pandas 3.x returns pd.NA for NULL DB values; pd.isna handles None, NaN, pd.NA all at once
+    _target_raw = latest_inn_row["target"]
+    _has_target = not pd.isna(_target_raw)
+    _target_int = int(_target_raw) if _has_target else None
     state = {
         "innings": int(latest_inn_row["innings"]),
         "batting_team": latest_inn_row["batting_team"],
         "score": int(latest_inn_row["score"]),
         "wickets": int(latest_inn_row["wickets"]),
         "overs_completed": float(latest_inn_row["overs"]),
-        "target": int(latest_inn_row["target"]) if latest_inn_row["target"] is not None else None,
-        "runs_needed": (int(latest_inn_row["target"]) - int(latest_inn_row["score"]))
-                       if latest_inn_row["target"] is not None else None,
+        "target": _target_int,
+        "runs_needed": (_target_int - int(latest_inn_row["score"])) if _has_target else None,
         "required_run_rate": (
-            ((int(latest_inn_row["target"]) - int(latest_inn_row["score"])) * 6 /
+            ((_target_int - int(latest_inn_row["score"])) * 6 /
              max(1, int(120 - latest_inn_row["overs"] * 6)))
-            if latest_inn_row["target"] is not None else None
+            if _has_target else None
         ),
     }
     take = explain_match_state(state, latest_wp_batting)
